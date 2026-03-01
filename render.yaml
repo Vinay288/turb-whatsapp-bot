@@ -1,0 +1,21 @@
+services:
+  - type: web
+    name: turf-booking-bot
+    env: python
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn main:app --host 0.0.0.0 --port $PORT
+    envVars:
+      - key: WA_TOKEN
+        sync: false
+      - key: PHONE_ID
+        sync: false
+      - key: RZP_KEY
+        sync: false
+      - key: RZP_SECRET
+        sync: false
+      - key: OWNER_EMAIL
+        sync: false
+      - key: EMAIL_PASS
+        sync: false
+      - key: SHEET_JSON
+        sync: false
