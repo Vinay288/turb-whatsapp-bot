@@ -14,7 +14,7 @@ VERIFY_TOKEN = "MY_TURF_TOKEN_123"
 scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
 creds_dict = json.loads(os.getenv("SHEET_JSON"))
 creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)
-db = gspread.authorize(creds).open("TurfBookingDB").sheet1
+db = gspread.authorize(creds).open("turf").sheet1
 
 user_sessions = {}
 
