@@ -15,7 +15,7 @@ scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/au
 # Paste your service_account.json content into a Render Env Var named SHEET_JSON
 creds_dict = json.loads(os.getenv("SHEET_JSON"))
 creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)
-db = gspread.authorize(creds).open("TurfBookingDB").sheet1
+db = gspread.authorize(creds).open("turf").sheet1
 
 # In-memory session to track user progress
 user_sessions = {}
