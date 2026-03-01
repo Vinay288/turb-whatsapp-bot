@@ -12,12 +12,10 @@ VERIFY_TOKEN = "MY_TURF_TOKEN_123"
 
 # --- GOOGLE SHEETS SETUP ---
 scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
-# Paste your service_account.json content into a Render Env Var named SHEET_JSON
 creds_dict = json.loads(os.getenv("SHEET_JSON"))
 creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)
-db = gspread.authorize(creds).open("turf").sheet1
+db = gspread.authorize(creds).open("TurfBookingDB").sheet1
 
-# In-memory session to track user progress
 user_sessions = {}
 
 # --- HELPER FUNCTIONS ---
@@ -34,23 +32,23 @@ def sync_to_sheets(phone, name=None, date=None, time=None, status="In-Progress")
     Columns: Timestamp(1), Phone(2), Date(3), Time(4), Status(5), Name(6)
     """
     try:
-        # Check if this user already has an active session in the sheet
-        cell = db.find(phone, in_column=2)
+        # Check if this user already exists in the Phone column (Column 2)
+        cell = db.find(str(phone), in_column=2)
         row = cell.row
         if name: db.update_cell(row, 6, name)
         if date: db.update_cell(row, 3, date)
         if time: db.update_cell(row, 4, time)
         db.update_cell(row, 5, status)
-        db.update_cell(row, 1, str(datetime.now())) # Refresh timestamp
-    except gspread.exceptions.CellNotFound:
+        db.update_cell(row, 1, str(datetime.now())) 
+    except gspread.CellNotFound: # FIXED ATTRIBUTE ERROR HERE
         # New Enquiry: Append a fresh row
-        db.append_row([str(datetime.now()), phone, date or "", time or "", status, name or ""])
+        db.append_row([str(datetime.now()), str(phone), date or "", time or "", status, name or ""])
 
 def get_live_availability(date_str):
-    """Counts 'Confirmed' rows in Sheets to calculate remaining slots"""
     records = db.get_all_records()
-    max_capacity = 10  # Total slots you have per day
-    booked = [r for r in records if r['Date'] == date_str and r['Status'] == 'Confirmed']
+    max_capacity = 10 
+    # Counts how many rows for this date have 'Confirmed' status
+    booked = [r for r in records if str(r.get('Date')) == date_str and r.get('Status') == 'Confirmed']
     return max(0, max_capacity - len(booked))
 
 # --- WEBHOOK LOGIC ---
@@ -61,7 +59,7 @@ async def verify(mode: str = Query(None, alias="hub.mode"),
                  challenge: str = Query(None, alias="hub.challenge")):
     if mode == "subscribe" and token == VERIFY_TOKEN:
         return Response(content=challenge, media_type="text/plain")
-    return {"status": "up"}
+    return {"status": "bot_active"}
 
 @app.post("/webhook")
 async def handle_whatsapp(request: Request):
@@ -73,7 +71,7 @@ async def handle_whatsapp(request: Request):
         msg = entry['messages'][0]
         phone = msg['from']
         
-        # 1. HANDLE START (HI / MENU)
+        # 1. START (HI / MENU)
         if msg.get("type") == "text" and msg["text"]["body"].lower() in ["hi", "hello", "menu"]:
             user_sessions[phone] = {"state": "START"}
             sync_to_sheets(phone, status="Started Enquiry")
@@ -84,24 +82,18 @@ async def handle_whatsapp(request: Request):
                 "interactive": {
                     "type": "button",
                     "body": {"text": body},
-                    "action": {"buttons": [{"type": "reply", "reply": {"id": "btn_book", "title": "⚽ Book a Slot"}},
-                                          {"type": "reply", "reply": {"id": "btn_loc", "title": "📍 Location"}}]}}
+                    "action": {"buttons": [{"type": "reply", "reply": {"id": "btn_book", "title": "⚽ Book a Slot"}}]}}
             }
             send_wa(phone, payload)
 
-        # 2. BUTTON CLICKS
+        # 2. BUTTON: BOOK NOW -> ASK NAME
         elif msg.get("type") == "interactive" and msg["interactive"].get("button_reply"):
             bid = msg["interactive"]["button_reply"]["id"]
-            
-            if bid == "btn_loc":
-                send_wa(phone, {"messaging_product": "whatsapp", "to": phone, "type": "location", 
-                                "location": {"latitude": "12.9716", "longitude": "77.5946", "name": "Pro Turf Arena", "address": "Bengaluru"}})
-            
-            elif bid == "btn_book":
+            if bid == "btn_book":
                 user_sessions[phone] = {"state": "AWAITING_NAME"}
                 send_wa(phone, {"messaging_product": "whatsapp", "to": phone, "type": "text", "text": {"body": "Great! What is your full name?"}})
 
-        # 3. NAME CAPTURE -> SHOW DATE MENU WITH AVAILABILITY
+        # 3. NAME CAPTURE -> SHOW DATE MENU
         elif user_sessions.get(phone, {}).get("state") == "AWAITING_NAME":
             user_name = msg["text"]["body"]
             user_sessions[phone] = {"state": "SELECTING_DATE", "name": user_name}
@@ -121,12 +113,12 @@ async def handle_whatsapp(request: Request):
             payload = {
                 "messaging_product": "whatsapp", "to": phone, "type": "interactive",
                 "interactive": {
-                    "type": "list", "header": {"type": "text", "text": "Pick a Date"},
-                    "body": {"text": f"Hi {user_name}, select a day to see timings:"},
+                    "type": "list", "header": {"type": "text", "text": "Step 2: Pick a Date"},
+                    "body": {"text": f"Hi {user_name}, select a day:"},
                     "action": {"button": "Select Date", "sections": [{"title": "Availability", "rows": date_rows}]}}}
             send_wa(phone, payload)
 
-        # 4. LIST SELECTIONS (DATE & TIME)
+        # 4. LIST SELECTIONS
         elif msg.get("type") == "interactive" and msg["interactive"].get("list_reply"):
             lid = msg["interactive"]["list_reply"]["id"]
             
@@ -135,8 +127,7 @@ async def handle_whatsapp(request: Request):
                 user_sessions[phone]["date"] = date_val
                 sync_to_sheets(phone, date=date_val, status="Selected Date")
                 
-                # Show available hours
-                hours = ["06:00 PM", "07:00 PM", "08:00 PM", "09:00 PM", "10:00 PM"]
+                hours = ["06:00 PM", "07:00 PM", "08:00 PM", "09:00 PM"]
                 time_rows = [{"id": f"final|{date_val}|{h}", "title": h} for h in hours]
                 payload = {
                     "messaging_product": "whatsapp", "to": phone, "type": "interactive",
@@ -150,18 +141,12 @@ async def handle_whatsapp(request: Request):
                 _, d_v, t_v = lid.split("|")
                 u_name = user_sessions[phone].get("name", "Customer")
                 
-                # FINAL STEP: Confirm Booking (Bypassing Payment)
                 sync_to_sheets(phone, date=d_v, time=t_v, status="Confirmed")
                 
-                confirm_msg = (
-                    f"✅ *Booking Confirmed!*\n\n"
-                    f"👤 *Name:* {u_name}\n"
-                    f"📅 *Date:* {d_v}\n"
-                    f"⏰ *Time:* {t_v}\n\n"
-                    "Our team will contact you shortly for details. See you there!"
-                )
+                confirm_body = f"✅ *Booking Confirmed!*\n\n👤 *Name:* {u_name}\n📅 *Date:* {d_v}\n⏰ *Time:* {t_v}\n\nOur team will contact you shortly. See you there!"
                 send_wa(phone, {"messaging_product": "whatsapp", "to": phone, "type": "text", "text": {"body": confirm_body}})
-                user_sessions.pop(phone, None) # Clear session
+                user_sessions.pop(phone, None) 
 
-    except Exception as e: print(f"Error: {e}")
+    except Exception as e: 
+        print(f"Error: {e}")
     return {"status": "ok"}
