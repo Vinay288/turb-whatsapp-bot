@@ -69,7 +69,15 @@ def get_availability(date_v):
     return [s for s in all_slots if s not in booked]
 
 # --- ENDPOINTS ---
-
+@app.get("/")
+async def root_verify(mode: str = Query(None, alias="hub.mode"), 
+                      token: str = Query(None, alias="hub.verify_token"), 
+                      challenge: str = Query(None, alias="hub.challenge")):
+    # This handles the GET request if Meta hits the base URL
+    if mode == "subscribe" and token == "MY_TURF_TOKEN_123":
+        return Response(content=challenge, media_type="text/plain")
+    return {"message": "Turf Bot is Running!"}
+                          
 @app.get("/webhook")
 async def verify(mode: str = Query(None, alias="hub.mode"), token: str = Query(None, alias="hub.verify_token"), challenge: str = Query(None, alias="hub.challenge")):
     if mode == "subscribe" and token == VERIFY_TOKEN:
