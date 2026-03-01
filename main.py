@@ -26,7 +26,7 @@ else:
     # Local testing fallback
     creds = ServiceAccountCredentials.from_json_keyfile_name("service_account.json", scope)
 
-db = gspread.authorize(creds).open("TurfBookingDB").sheet1
+db = gspread.authorize(creds).open("turf").sheet1
 rzp = razorpay.Client(auth=(RZP_KEY, RZP_SECRET))
 
 # In-memory session tracking
