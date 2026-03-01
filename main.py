@@ -57,16 +57,18 @@ def sync_by_session(session_id, phone, name=None, date=None, time_val=None, stat
 
 def send_wa(to, payload):
     url = f"https://graph.facebook.com/v21.0/{PHONE_ID}/messages"
-    headers = {"Authorization": f"Bearer {WA_TOKEN}", "Content-Type": "application/json"}
-    return requests.post(url, json=payload, headers=headers)
-
-@app.get("/webhook")
-async def verify(mode: str = Query(None, alias="hub.mode"), 
-                 token: str = Query(None, alias="hub.verify_token"), 
-                 challenge: str = Query(None, alias="hub.challenge")):
-    if mode == "subscribe" and token == VERIFY_TOKEN:
-        return Response(content=challenge, media_type="text/plain")
-    return {"status": "online"}
+    headers = {
+        "Authorization": f"Bearer {WA_TOKEN}", 
+        "Content-Type": "application/json"
+    }
+    response = requests.post(url, json=payload, headers=headers)
+    
+    # DEBUG LOGS - Check these in Render!
+    print(f"Sending to {to}...")
+    print(f"Meta Response Status: {response.status_code}")
+    print(f"Meta Response Body: {response.text}")
+    
+    return response
 
 @app.post("/webhook")
 async def handle_whatsapp(request: Request):
