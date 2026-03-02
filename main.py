@@ -6,6 +6,7 @@ from oauth2client.service_account import ServiceAccountCredentials
 app = FastAPI()
 
 # --- CONFIG ---
+# Ensure these are set in your Environment Variables (Replit/Heroku/Railway)
 WA_TOKEN = os.getenv("WA_TOKEN")
 PHONE_ID = os.getenv("PHONE_ID")
 VERIFY_TOKEN = "MY_TURF_TOKEN_123"
@@ -35,10 +36,10 @@ user_sessions = {}
 # --- SLOT LOGIC ---
 
 def get_slots_info(date_str):
+    """Checks the sheet and returns (list of booked times, count of slots left)"""
     if db is None: return ([], TOTAL_CAPACITY_PER_DAY)
     try:
         records = db.get_all_records()
-        # Filters for confirmed bookings on that specific date
         booked = [r.get('Time') for r in records if str(r.get('Date')) == date_str and r.get('Status') == 'Confirmed']
         left = max(0, TOTAL_CAPACITY_PER_DAY - len(booked))
         return (booked, left)
@@ -46,6 +47,7 @@ def get_slots_info(date_str):
         return ([], TOTAL_CAPACITY_PER_DAY)
 
 def sync_by_session(session_id, phone, name=None, date=None, time_val=None, status="Enquiry"):
+    """Updates or creates a row in Google Sheets based on the SessionID"""
     if db is None: return
     try:
         sessions_col = db.col_values(7) # Column G: SessionID
@@ -77,32 +79,37 @@ async def verify(mode: str = Query(None, alias="hub.mode"), token: str = Query(N
 @app.post("/webhook")
 async def handle_whatsapp(request: Request):
     data = await request.json()
+    
     try:
+        if "value" not in data['entry'][0]['changes'][0]: return {"ok": True}
         entry = data['entry'][0]['changes'][0]['value']
         if "messages" not in entry: return {"ok": True}
+        
         msg = entry['messages'][0]
         phone = msg['from']
         if db is None: connect_to_sheet()
-        
-        # --- PRIORITY 1: HANDLE INTERACTIVE CLICKS ---
+
+        # --- PRIORITY 1: HANDLE INTERACTIVE RESPONSES (List/Buttons) ---
         if msg.get("type") == "interactive":
-            interactive = msg["interactive"]
+            interact = msg.get("interactive", {})
             
-            # Handle List Selection (Date or Time)
-            if interactive.get("list_reply"):
-                lid = interactive["list_reply"]["id"]
-                
-                # DATE SELECTED
+            # 1A. HANDLE LIST CLICKS (DATE & TIME)
+            if interact.get("type") == "list_reply":
+                lid = interact["list_reply"]["id"]
+
+                # USER SELECTED A DATE
                 if lid.startswith("date_"):
                     date_val = lid.split("_")[1]
                     booked, left = get_slots_info(date_val)
 
-                    if left == 0:
-                        send_wa(phone, {"messaging_product": "whatsapp", "to": phone, "type": "text", "text": {"body": f"❌ No slots available for {date_val}. Please select another day!"}})
-                        return {"ok": True}
-
-                    user_sessions[phone].update({"state": "TIME", "date": date_val})
+                    # Ensure session exists
+                    if phone not in user_sessions:
+                        user_sessions[phone] = {"session_id": f"{phone}_{int(time.time())}"}
                     
+                    user_sessions[phone].update({"state": "TIME", "date": date_val})
+                    sync_by_session(user_sessions[phone]["session_id"], phone, date=date_val, status="Selecting Time")
+
+                    # Slots: 6 AM to 6 PM
                     all_times = [
                         "06:00 AM", "07:00 AM", "08:00 AM", "09:00 AM", "10:00 AM", "11:00 AM",
                         "12:00 PM", "01:00 PM", "02:00 PM", "03:00 PM", "04:00 PM", "05:00 PM"
@@ -110,37 +117,43 @@ async def handle_whatsapp(request: Request):
                     available = [t for t in all_times if t not in booked]
                     
                     time_rows = [{"id": f"time_{date_val}_{s}", "title": s} for s in available]
+                    
                     send_wa(phone, {
                         "messaging_product": "whatsapp", "to": phone, "type": "interactive",
                         "interactive": {
                             "type": "list", 
                             "header": {"type": "text", "text": "Step 3: Select Time"},
-                            "body": {"text": f"Showing available times for *{date_val}*:"},
-                            "action": {"button": "🕒 Pick Time", "sections": [{"title": "Available Slots", "rows": time_rows}]}}
+                            "body": {"text": f"Perfect! Showing available slots for *{date_val}*:"},
+                            "action": {"button": "🕒 Pick a Slot", "sections": [{"title": "Daylight Sessions", "rows": time_rows}]}}
                     })
 
-                # TIME SELECTED
+                # USER SELECTED A TIME (FINAL CONFIRMATION)
                 elif lid.startswith("time_"):
                     _, d_v, t_v = lid.split("_", 2)
                     sess = user_sessions.get(phone)
-                    if sess:
-                        sync_by_session(sess["session_id"], phone, date=d_v, time_val=t_v, status="Confirmed")
-                        confirm_body = (
-                            "🎉 *BOOKING SUCCESSFUL!*\n\n"
-                            f"👤 *Player:* {sess.get('name')}\n"
-                            f"📅 *Date:* {d_v}\n"
-                            f"⏰ *Time:* {t_v}\n\n"
-                            "Ready to play? Let's kick off! ⚽🏏"
-                        )
-                        send_wa(phone, {"messaging_product": "whatsapp", "to": phone, "type": "text", "text": {"body": confirm_body}})
-                        user_sessions.pop(phone, None)
+                    name = sess.get("name", "Player") if sess else "Player"
+                    s_id = sess.get("session_id") if sess else f"{phone}_lost"
+                    
+                    sync_by_session(s_id, phone, date=d_v, time_val=t_v, status="Confirmed")
+                    
+                    confirm_body = (
+                        "🎉 *BOOKING SUCCESSFUL!*\n\n"
+                        f"👤 *Player:* {name}\n"
+                        f"📅 *Date:* {d_v}\n"
+                        f"⏰ *Time:* {t_v}\n\n"
+                        "Ready to play? Let's kick off and hit it out of the park! ⚽🏏"
+                    )
+                    send_wa(phone, {"messaging_product": "whatsapp", "to": phone, "type": "text", "text": {"body": confirm_body}})
+                    user_sessions.pop(phone, None)
 
-            # Handle Button Selection (Book Now)
-            elif interactive.get("button_reply"):
-                bid = interactive["button_reply"]["id"]
+            # 1B. HANDLE BUTTON CLICKS (BOOK NOW)
+            elif interact.get("type") == "button_reply":
+                bid = interact["button_reply"]["id"]
                 if bid == "book":
+                    if phone not in user_sessions:
+                        user_sessions[phone] = {"session_id": f"{phone}_{int(time.time())}"}
                     user_sessions[phone]["state"] = "NAME"
-                    send_wa(phone, {"messaging_product": "whatsapp", "to": phone, "type": "text", "text": {"body": "Great! Please type your *Full Name*:"}})
+                    send_wa(phone, {"messaging_product": "whatsapp", "to": phone, "type": "text", "text": {"body": "Great! Please type your *Full Name* to start the booking:"}})
             
             return {"ok": True}
 
@@ -148,6 +161,7 @@ async def handle_whatsapp(request: Request):
         text = msg.get("text", {}).get("body", "").lower().strip()
         is_greeting = re.search(r"\b(hi|hello|hey|start|book|turf|match|play|slots)\b", text)
 
+        # START MESSAGE
         if is_greeting:
             new_sess = f"{phone}_{int(time.time())}"
             user_sessions[phone] = {"session_id": new_sess, "state": "START"}
@@ -170,7 +184,7 @@ async def handle_whatsapp(request: Request):
                     "action": {"buttons": [{"type": "reply", "reply": {"id": "book", "title": "⚡ Book Now"}}]}}
             })
 
-        # Name Capture
+        # NAME CAPTURE
         elif phone in user_sessions and user_sessions[phone].get("state") == "NAME":
             name = msg["text"]["body"]
             user_sessions[phone].update({"state": "DATE", "name": name})
@@ -194,7 +208,7 @@ async def handle_whatsapp(request: Request):
                     "type": "list", 
                     "header": {"type": "text", "text": "Step 2: Pick Date"},
                     "body": {"text": f"Hi {name}, choose a day for your match:"},
-                    "action": {"button": "📅 Select Date", "sections": [{"title": "Availability", "rows": rows}]}}
+                    "action": {"button": "📅 Select Date", "sections": [{"title": "Next 7 Days", "rows": rows}]}}
             })
 
     except Exception as e: 
