@@ -45,8 +45,10 @@ def get_user_name_if_exists(phone):
 def get_slots_info(date_str):
     if db is None: return ([], TOTAL_CAPACITY_PER_DAY)
     try:
+        print(date_str)
         records = db.get_all_records()
         booked = [str(r.get('Time')).strip() for r in records if str(r.get('Date')).strip() == date_str and str(r.get('Status')).strip().lower() == 'confirmed']
+        print(booked)
         left = max(0, TOTAL_CAPACITY_PER_DAY - len(booked))
         return (booked, left)
     except: return ([], TOTAL_CAPACITY_PER_DAY)
