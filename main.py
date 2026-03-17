@@ -26,7 +26,6 @@ def get_db():
         creds_dict = json.loads(os.getenv("SHEET_JSON"))
         creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)
         gc = gspread.authorize(creds)
-        # Ensure your sheet name matches exactly "turf"
         return gc.open("turf").sheet1
     except Exception as e:
         print(f"❌ Sheet Error: {e}")
@@ -43,7 +42,6 @@ def send_wa(to, payload):
     return requests.post(url, json=payload, headers=headers)
 
 def get_user_name_from_db(phone):
-    """Checks the sheet for this phone number and returns the most recent name."""
     db = get_db()
     if not db: return None
     try:
@@ -55,22 +53,17 @@ def get_user_name_from_db(phone):
     return None
 
 def calculate_price(time_str):
-    """
-    Returns the price based on time:
-    6 AM - 6 PM: 800
-    6 PM - 11 PM: 1000
-    """
     try:
-        # Parsing "06:00 PM" format
-        time_obj = datetime.strptime(time_str, "%I:%M %p").time()
+        # Standardizing "6:00 PM" vs "06:00 PM"
+        t_str = time_str.strip().upper()
+        if len(t_str.split(":")[0]) == 1: t_str = "0" + t_str
+        
+        time_obj = datetime.strptime(t_str, "%I:%M %p").time()
         day_limit = datetime.strptime("06:00 PM", "%I:%M %p").time()
         
-        if time_obj < day_limit:
-            return 800
-        else:
-            return 1000
+        return 800 if time_obj < day_limit else 1000
     except:
-        return 900 # Default fallback
+        return 900
 
 def get_available_slots(date_str):
     db = get_db()
@@ -87,13 +80,16 @@ def get_available_slots(date_str):
 
         if sheet_date == date_str and sheet_status == 'available':
             try:
-                # Combine Date (YYYY-MM-DD) and Time (HH:MM AM/PM)
-                slot_dt = datetime.strptime(f"{sheet_date} {sheet_time}", "%Y-%m-%d %I:%M %p")
+                # Format time string for parsing
+                t_str = sheet_time.upper()
+                if len(t_str.split(":")[0]) == 1: t_str = "0" + t_str
                 
-                # Filter out past slots (with a 5-min grace period)
-                if slot_dt > (now - timedelta(minutes=5)):
+                slot_dt = datetime.strptime(f"{sheet_date} {t_str}", "%Y-%m-%d %I:%M %p")
+                
+                # Filter out past slots
+                if slot_dt > (now - timedelta(minutes=10)):
                     available.append(sheet_time)
-            except Exception as e:
+            except:
                 available.append(sheet_time)
                 
     return available
@@ -101,7 +97,6 @@ def get_available_slots(date_str):
 def send_date_menu(phone, name):
     today = datetime.now()
     rows = []
-    # Expanded to 7 days as requested
     for i in range(7): 
         d_obj = today + timedelta(days=i)
         d_str = d_obj.strftime('%Y-%m-%d')
@@ -161,7 +156,6 @@ def send_chosen_slots_summary(phone):
         summary_lines.append(f"• {item} (₹{price})")
         total_price += price
 
-    # Testing price: 1 Rupee per slot
     test_total = len(chosen_slots) * 1 
     summary = "*Chosen Slots:*\n" + "\n".join(summary_lines)
     
