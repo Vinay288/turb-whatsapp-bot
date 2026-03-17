@@ -54,43 +54,51 @@ def get_user_name_from_db(phone):
 
 def calculate_price(time_str):
     try:
-        # Standardizing "6:00 PM" vs "06:00 PM"
         t_str = time_str.strip().upper()
         if len(t_str.split(":")[0]) == 1: t_str = "0" + t_str
-        
         time_obj = datetime.strptime(t_str, "%I:%M %p").time()
         day_limit = datetime.strptime("06:00 PM", "%I:%M %p").time()
-        
         return 800 if time_obj < day_limit else 1000
     except:
         return 900
 
-def get_available_slots(date_str):
+def get_slots_for_date(date_str):
+    """
+    Returns a list of available slots and the count.
+    Logic: All slots from 06:00 AM to 11:00 PM are available by default 
+    UNLESS the sheet has a record for that Date/Time with status != 'available'.
+    """
     db = get_db()
-    if not db: return []
-    
-    records = db.get_all_records()
     now = datetime.now()
-    available = []
     
-    for r in records:
-        sheet_date = str(r.get('Date', '')).strip()
-        sheet_status = str(r.get('Status', '')).strip().lower()
-        sheet_time = str(r.get('Time', '')).strip()
+    # Define the full schedule
+    all_timings = [
+        "06:00 AM", "07:00 AM", "08:00 AM", "09:00 AM", "10:00 AM", "11:00 AM",
+        "12:00 PM", "01:00 PM", "02:00 PM", "03:00 PM", "04:00 PM", "05:00 PM",
+        "06:00 PM", "07:00 PM", "08:00 PM", "09:00 PM", "10:00 PM", "11:00 PM"
+    ]
+    
+    booked_slots = []
+    if db:
+        try:
+            records = db.get_all_records()
+            booked_slots = [
+                str(r.get('Time')).strip().upper() 
+                for r in records 
+                if str(r.get('Date')).strip() == date_str and str(r.get('Status')).strip().lower() != 'available'
+            ]
+        except: pass
 
-        if sheet_date == date_str and sheet_status == 'available':
+    available = []
+    for t in all_timings:
+        if t.upper() not in booked_slots:
             try:
-                # Format time string for parsing
-                t_str = sheet_time.upper()
-                if len(t_str.split(":")[0]) == 1: t_str = "0" + t_str
-                
-                slot_dt = datetime.strptime(f"{sheet_date} {t_str}", "%Y-%m-%d %I:%M %p")
-                
                 # Filter out past slots
-                if slot_dt > (now - timedelta(minutes=10)):
-                    available.append(sheet_time)
+                slot_dt = datetime.strptime(f"{date_str} {t}", "%Y-%m-%d %I:%M %p")
+                if slot_dt > (now - timedelta(minutes=5)):
+                    available.append(t)
             except:
-                available.append(sheet_time)
+                available.append(t)
                 
     return available
 
@@ -100,10 +108,13 @@ def send_date_menu(phone, name):
     for i in range(7): 
         d_obj = today + timedelta(days=i)
         d_str = d_obj.strftime('%Y-%m-%d')
+        available_slots = get_slots_for_date(d_str)
+        count = len(available_slots)
+        
         rows.append({
             "id": f"date_{d_str}", 
             "title": d_str, 
-            "description": d_obj.strftime('%A')
+            "description": f"{d_obj.strftime('%A')} | {count} slots available"
         })
     
     send_wa(phone, {
@@ -111,15 +122,15 @@ def send_date_menu(phone, name):
         "interactive": {
             "type": "list",
             "header": {"type": "text", "text": "Step 2: Choose Date"},
-            "body": {"text": f"Hi {name}, pick your match date below to see available timings:"},
+            "body": {"text": f"Hi {name}, pick your match date below:"},
             "action": {"button": "📅 Select Date", "sections": [{"title": "7-Day Schedule", "rows": rows}]}
         }
     })
 
 def send_slot_list(phone, date_str):
-    slots = get_available_slots(date_str)
+    slots = get_slots_for_date(date_str)
     if not slots:
-        send_wa(phone, {"messaging_product": "whatsapp", "to": phone, "type": "text", "text": {"body": "❌ Sorry! No more slots available for this date."}})
+        send_wa(phone, {"messaging_product": "whatsapp", "to": phone, "type": "text", "text": {"body": "❌ Sorry! No slots left for this date."}})
         return
 
     rows = []
@@ -136,8 +147,8 @@ def send_slot_list(phone, date_str):
         "interactive": {
             "type": "list",
             "header": {"type": "text", "text": "Step 3: Choose Time"},
-            "body": {"text": f"Showing available slots for *{date_str}*:"},
-            "action": {"button": "🕒 Pick Timing", "sections": [{"title": "Available Slots", "rows": rows}]}
+            "body": {"text": f"Available slots for *{date_str}*:"},
+            "action": {"button": "🕒 Pick Timing", "sections": [{"title": "Timings", "rows": rows}]}
         }
     })
 
@@ -145,7 +156,7 @@ def send_chosen_slots_summary(phone):
     sess = user_sessions.get(phone, {"chosen_slots": []})
     chosen_slots = sess.get("chosen_slots", [])
     if not chosen_slots:
-        send_wa(phone, {"messaging_product": "whatsapp", "to": phone, "type": "text", "text": {"body": "You haven't chosen any slots yet."}})
+        send_wa(phone, {"messaging_product": "whatsapp", "to": phone, "type": "text", "text": {"body": "No slots chosen."}})
         return
 
     summary_lines = []
@@ -156,18 +167,18 @@ def send_chosen_slots_summary(phone):
         summary_lines.append(f"• {item} (₹{price})")
         total_price += price
 
+    # Test rate: ₹1 per slot
     test_total = len(chosen_slots) * 1 
-    summary = "*Chosen Slots:*\n" + "\n".join(summary_lines)
     
     send_wa(phone, {
         "messaging_product": "whatsapp", "to": phone, "type": "interactive",
         "interactive": {
             "type": "button",
-            "body": {"text": f"{summary}\n\n*Total (Test): ₹{test_total}*\n(Actual: ₹{total_price})\n\nReady to finalize?"},
+            "body": {"text": f"*Chosen Slots:*\n" + "\n".join(summary_lines) + f"\n\n*Total (Test): ₹{test_total}*"},
             "action": {"buttons": [
                 {"type": "reply", "reply": {"id": "add_more", "title": "➕ Add More"}},
-                {"type": "reply", "reply": {"id": "pay_now", "title": f"💳 Checkout"}},
-                {"type": "reply", "reply": {"id": "clear", "title": "❌ Clear Chosen"}}
+                {"type": "reply", "reply": {"id": "pay_now", "title": "💳 Checkout"}},
+                {"type": "reply", "reply": {"id": "clear", "title": "❌ Clear All"}}
             ]}
         }
     })
@@ -208,7 +219,7 @@ async def handle_whatsapp(request: Request):
 
             elif rid == "clear":
                 user_sessions[phone]["chosen_slots"] = []
-                send_wa(phone, {"messaging_product": "whatsapp", "to": phone, "type": "text", "text": {"body": "Chosen slots cleared. Type 'Hi' to start over."}})
+                send_wa(phone, {"messaging_product": "whatsapp", "to": phone, "type": "text", "text": {"body": "Selection cleared."}})
 
             elif rid.startswith("date_"):
                 date_val = rid.split("_")[1]
@@ -233,7 +244,7 @@ async def handle_whatsapp(request: Request):
                     "callback_url": "https://your-turf-site.com/success",
                     "callback_method": "get"
                 })
-                send_wa(phone, {"messaging_product": "whatsapp", "to": phone, "type": "text", "text": {"body": f"Please complete your payment to secure these slots:\n\n🔗 {payment['short_url']}"}})
+                send_wa(phone, {"messaging_product": "whatsapp", "to": phone, "type": "text", "text": {"body": f"Pay here to confirm:\n🔗 {payment['short_url']}"}})
 
         elif msg.get("type") == "text":
             body = msg['text']['body'].strip()
@@ -244,13 +255,13 @@ async def handle_whatsapp(request: Request):
                 send_date_menu(phone, body)
                 return {"ok": True}
 
-            if any(greet in body.lower() for greet in ["hi", "hello", "book", "hey"]):
+            if any(greet in body.lower() for greet in ["hi", "hello", "book"]):
                 user_sessions[phone]["chosen_slots"] = []
                 known_name = get_user_name_from_db(phone)
                 welcome_header = f"Welcome back, *{known_name}*! " if known_name else "Welcome to *The GSS Turf*! ⚽🏏"
                 welcome_msg = (
                     f"{welcome_header}\n\n"
-                    "Ready for a match? Book your slots in seconds.\n"
+                    "Ready for a match?\n"
                     "💰 *Rates:*\n• 6 AM - 6 PM: ₹800\n• 6 PM - 11 PM: ₹1000"
                 )
                 send_wa(phone, {
@@ -275,23 +286,11 @@ async def handle_razorpay(request: Request):
         
         db = get_db()
         if db:
-            records = db.get_all_records()
             for slot_item in slots_list:
                 d_v, t_v = slot_item.split(" | ")
-                for idx, r in enumerate(records):
-                    if str(r.get('Date')).strip() == d_v and str(r.get('Time')).strip() == t_v:
-                        db.update_cell(idx + 2, 3, "Confirmed")
-                        try:
-                            db.update_cell(idx + 2, 4, str(phone))
-                            db.update_cell(idx + 2, 5, user_name)
-                        except: pass
+                db.append_row([datetime.now().strftime("%Y-%m-%d %H:%M:%S"), str(phone), d_v, t_v, "Confirmed", user_name])
         
-        confirmation = (
-            "✅ *PAYMENT SUCCESSFUL!*\n"
-            f"Your booking for {slots_str.replace(';', ', ')} is confirmed.\n\n"
-            "Get your gear ready! See you at the turf. 🏟️"
-        )
-        send_wa(phone, {"messaging_product": "whatsapp", "to": phone, "type": "text", "text": {"body": confirmation}})
+        send_wa(phone, {"messaging_product": "whatsapp", "to": phone, "type": "text", "text": {"body": f"✅ *Confirmed!*\nYour slots for {slots_str.replace(';', ', ')} are booked. See you! 🏟️"}})
         if phone in user_sessions: user_sessions[phone]["chosen_slots"] = []
 
     return {"status": "ok"}
