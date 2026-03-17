@@ -26,6 +26,7 @@ def get_db():
         creds_dict = json.loads(os.getenv("SHEET_JSON"))
         creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)
         gc = gspread.authorize(creds)
+        # Ensure your sheet name matches exactly "turf"
         return gc.open("turf").sheet1
     except Exception as e:
         print(f"❌ Sheet Error: {e}")
@@ -41,8 +42,25 @@ def send_wa(to, payload):
     headers = {"Authorization": f"Bearer {WA_TOKEN}", "Content-Type": "application/json"}
     return requests.post(url, json=payload, headers=headers)
 
+def calculate_price(time_str):
+    """
+    Returns the price based on time:
+    6 AM - 6 PM: 800
+    6 PM - 11 PM: 1000
+    """
+    try:
+        # Parsing "06:00 PM" format
+        time_obj = datetime.strptime(time_str, "%I:%M %p").time()
+        day_limit = datetime.strptime("06:00 PM", "%I:%M %p").time()
+        
+        if time_obj < day_limit:
+            return 800
+        else:
+            return 1000
+    except:
+        return 900 # Default fallback
+
 def get_available_slots(date_str):
-    """Filters slots by date, availability, and ensures they aren't in the past."""
     db = get_db()
     if not db: return []
     
@@ -51,25 +69,30 @@ def get_available_slots(date_str):
     available = []
     
     for r in records:
-        if str(r.get('Date')).strip() == date_str and str(r.get('Status')).strip().lower() == 'available':
+        # Cleaning strings to ensure match
+        sheet_date = str(r.get('Date', '')).strip()
+        sheet_status = str(r.get('Status', '')).strip().lower()
+        sheet_time = str(r.get('Time', '')).strip()
+
+        if sheet_date == date_str and sheet_status == 'available':
             try:
-                # Expected format: YYYY-MM-DD and HH:MM AM/PM
-                slot_time_str = str(r.get('Time')).strip()
-                slot_dt = datetime.strptime(f"{date_str} {slot_time_str}", "%Y-%m-%d %I:%M %p")
+                # Combine Date (YYYY-MM-DD) and Time (HH:MM AM/PM)
+                slot_dt = datetime.strptime(f"{sheet_date} {sheet_time}", "%Y-%m-%d %I:%M %p")
                 
-                # Only show slots that are at least 15 minutes in the future
-                if slot_dt > (now + timedelta(minutes=15)):
-                    available.append(slot_time_str)
+                # Filter out past slots (with a 5-min grace period)
+                if slot_dt > (now - timedelta(minutes=5)):
+                    available.append(sheet_time)
             except Exception as e:
-                # Fallback if time parsing fails (shows all for that date)
-                available.append(str(r.get('Time')))
+                # If parsing fails, we show the slot rather than hiding it
+                available.append(sheet_time)
                 
     return available
 
 def send_date_menu(phone, name):
     today = datetime.now()
     rows = []
-    for i in range(3): # Show Today, Tomorrow, and Day After
+    # Expanded to 7 days as requested
+    for i in range(7): 
         d_obj = today + timedelta(days=i)
         d_str = d_obj.strftime('%Y-%m-%d')
         rows.append({
@@ -84,7 +107,7 @@ def send_date_menu(phone, name):
             "type": "list",
             "header": {"type": "text", "text": "Step 1: Choose Date"},
             "body": {"text": f"Hi {name}, pick your match date below to see available timings:"},
-            "action": {"button": "📅 Select Date", "sections": [{"title": "Dates", "rows": rows}]}
+            "action": {"button": "📅 Select Date", "sections": [{"title": "7-Day Schedule", "rows": rows}]}
         }
     })
 
@@ -94,7 +117,15 @@ def send_slot_list(phone, date_str):
         send_wa(phone, {"messaging_product": "whatsapp", "to": phone, "type": "text", "text": {"body": "❌ Sorry! No more slots available for this date."}})
         return
 
-    rows = [{"id": f"select_{date_str}_{s}", "title": s} for s in slots[:10]]
+    rows = []
+    for s in slots[:10]:
+        price = calculate_price(s)
+        rows.append({
+            "id": f"select_{date_str}_{s}", 
+            "title": s,
+            "description": f"Rate: ₹{price}/hr"
+        })
+
     send_wa(phone, {
         "messaging_product": "whatsapp", "to": phone, "type": "interactive",
         "interactive": {
@@ -112,14 +143,26 @@ def send_chosen_slots_summary(phone):
         send_wa(phone, {"messaging_product": "whatsapp", "to": phone, "type": "text", "text": {"body": "You haven't chosen any slots yet."}})
         return
 
-    summary = "*Chosen Slots:*\n" + "\n".join([f"• {item}" for item in chosen_slots])
-    total = len(chosen_slots) * 900 
+    summary_lines = []
+    total_price = 0
+    
+    for item in chosen_slots:
+        # item format is "YYYY-MM-DD | HH:MM AM/PM"
+        time_part = item.split(" | ")[1]
+        price = calculate_price(time_part)
+        summary_lines.append(f"• {item} (₹{price})")
+        total_price += price
+
+    # For testing, we use 1 Rupee per slot as requested
+    test_total = len(chosen_slots) * 1 
+
+    summary = "*Chosen Slots:*\n" + "\n".join(summary_lines)
     
     send_wa(phone, {
         "messaging_product": "whatsapp", "to": phone, "type": "interactive",
         "interactive": {
             "type": "button",
-            "body": {"text": f"{summary}\n\n*Grand Total: ₹{total}*\n\nWould you like to add another hour or proceed to payment?"},
+            "body": {"text": f"{summary}\n\n*Total (Test): ₹{test_total}*\n(Actual: ₹{total_price})\n\nReady to finalize?"},
             "action": {"buttons": [
                 {"type": "reply", "reply": {"id": "add_more", "title": "➕ Add More"}},
                 {"type": "reply", "reply": {"id": "pay_now", "title": f"💳 Checkout"}},
@@ -145,7 +188,6 @@ async def handle_whatsapp(request: Request):
         msg = entry['messages'][0]
         phone = msg['from']
 
-        # Init session
         if phone not in user_sessions:
             user_sessions[phone] = {"chosen_slots": [], "name": "Player"}
 
@@ -174,11 +216,11 @@ async def handle_whatsapp(request: Request):
 
             elif rid == "pay_now":
                 chosen_slots = user_sessions[phone]["chosen_slots"]
-                total = len(chosen_slots) * 900
+                # 1 Rupee per slot for testing
+                test_total = len(chosen_slots) * 1 
                 
-                # Generate Razorpay Link
                 payment = rzp_client.payment_link.create({
-                    "amount": total * 100,
+                    "amount": int(test_total * 100),
                     "currency": "INR",
                     "description": f"Match Booking: {', '.join(chosen_slots)}",
                     "customer": {"contact": phone},
@@ -196,7 +238,7 @@ async def handle_whatsapp(request: Request):
                 welcome_msg = (
                     "Welcome to *The GSS Turf*! ⚽🏏\n\n"
                     "Ready for a match? Book your slots in seconds.\n"
-                    "💰 *Rate:* ₹900 per hour"
+                    "💰 *Rates:*\n• 6 AM - 6 PM: ₹800\n• 6 PM - 11 PM: ₹1000"
                 )
                 send_wa(phone, {
                     "messaging_product": "whatsapp", "to": phone, "type": "interactive",
@@ -223,8 +265,9 @@ async def handle_razorpay(request: Request):
             for slot_item in slots_list:
                 d_v, t_v = slot_item.split(" | ")
                 for idx, r in enumerate(records):
+                    # Strict matching for Date and Time
                     if str(r.get('Date')).strip() == d_v and str(r.get('Time')).strip() == t_v:
-                        db.update_cell(idx + 2, 3, "Confirmed") # Marking Column C as Confirmed
+                        db.update_cell(idx + 2, 3, "Confirmed")
         
         confirmation = (
             "✅ *PAYMENT SUCCESSFUL!*\n"
